@@ -14,6 +14,7 @@ See [CONTRIBUTING](./CONTRIBUTING.md) for the development workflow.
 
 Git locations:
 
+* <https://github.com/nogproject/bcpfs>: selected branches
 * <https://git.imp.fu-berlin.de/bcp/bcpfs>: selected branches
 * The full Git repo is at the standard location on the ZIB filesystem.
 
