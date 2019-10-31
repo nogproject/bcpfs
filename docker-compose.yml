@@ -1,0 +1,81 @@
+# See CONTRIBUTING.md for usage.
+#
+# See <https://blog.blindside.io/docker-compose-go-c2bb7bed0bab#.vrx7k611p> for
+# general idea how to use Docker Compose for a dev environment.
+#
+# # Volumes and Containers
+#
+# See comments at individual volumes and containers.
+
+version: '2'
+
+volumes:
+  # Volume `go` contains the entire `/go` tree to maintain state between `dev`
+  # container runs.  The volume may need to be recreated after changes to the
+  # `godev` image, so that `/go` is re-populated from the image.
+  go: {}
+
+  # Volume `godev-root-cache` is mounted as `/root/.cache`.  It contains the Go
+  # build cache, which Go uses since 1.10, see
+  # <https://golang.org/doc/go1.10#build>.  The actual cache is a subdir.  Its
+  # path is reported by:
+  #
+  # ```
+  # ddev go env GOCACHE
+  # ```
+  #
+  godev-root-cache: {}
+
+  # Volume `orgfs` contains the fake central filesystem.
+  orgfs: {}
+
+services:
+  # Container `podbase` provides a common network namespace, so that other
+  # containers can talk on localhost.
+  podbase:
+    image: gcr.io/google_containers/pause-amd64:3.0
+    ports: []
+
+  # Container `godev` is for make.
+  godev:
+    build: ./tools/images/godev
+    image: godev:bcpfs
+    network_mode: service:podbase
+    volumes:
+      - go:/go
+      - godev-root-cache:/root/.cache
+      - .:/go/src/github.com/nogproject/bcpfs
+    working_dir: /go/src/github.com/nogproject/bcpfs
+    command: |
+      echo 'Usage: See `make help` and CONTRIBUTING.md.'
+
+  # Container `fake` mimics a generic central file server for testing.
+  fake:
+    build: ./tools/images/bcpfsfake
+    image: bcpfsfake:latest
+    volumes:
+      - go:/go
+      - orgfs:/orgfs
+      - ./cmd/bcpfs-perms/generic-example-bcpfs.hcl:/etc/bcpfs.hcl
+      - ./bin/bcpfs-propagate-toplevel-acls:/etc/bcpfs-propagate-toplevel-acls
+    command: |
+      echo '
+      Usage:
+        dfake bcpfs-perms ...
+        dfake getent group
+      '
+
+  # Container `godoc` runs a godoc server on 6060.
+  godoc:
+    image: godev:bcpfs
+    ports:
+      - "127.0.0.1:6060:6060"
+    volumes:
+      - go:/go
+      - .:/go/src/github.com/nogproject/bcpfs
+    working_dir: /go/src/github.com/nogproject/bcpfs
+    command:
+      - godoc
+      - --http=:6060
+    environment:
+      - no_proxy=localhost,127.0.0.1

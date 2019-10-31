@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package suc;
+option go_package = "sucpb";
+
+// Service `Ping` is used to test the Unix domain socket connection.
+service Ping {
+    rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {};
+message PingResponse {};
+
+// Service `SuCall` provides privileged operations; see NOE-12.
+service SuCall {
+    rpc Status(StatusRequest) returns (StatusResponse);
+    rpc SetQuota(SetQuotaRequest) returns (SetQuotaResponse);
+}
+
+message StatusRequest{};
+
+message StatusResponse{
+    string text = 1;
+}
+
+message SetQuotaRequest{
+    string filesystem = 1;
+    QuotaScope scope = 2;
+    repeated QuotaLimit limits = 3;
+}
+
+enum QuotaScope {
+    UNSPECIFIED = 0;
+    USER_QUOTA = 1;
+    GROUP_QUOTA = 2;
+}
+
+message QuotaLimit {
+    string xid = 1;
+    uint64 block_soft_limit = 2;
+    uint64 block_hard_limit = 3;
+    uint64 inode_soft_limit = 4;
+    uint64 inode_hard_limit = 5;
+}
+
+message SetQuotaResponse{};

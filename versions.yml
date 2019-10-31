@@ -1,0 +1,30 @@
+# Use format that works with `grep "^${key}:" | cut -d : -f 2 | tr -d ' '`.
+
+# See `gitk -- versions.yml CHANGELOG.md` to understand the relation between
+# `versions.yml` and `CHANGELOG.md`.
+#
+# To start a new release cycle, add a changelog section that is marked as
+# 'unreleased' and bump the corresponding version to the same number with a
+# pre-release suffix `-dev`.  Leave individual program versions unchanged.
+# Bump them when the individual program changes.
+#
+# To complete a release cycle, remove 'unreleased' in the changelog and `-dev`
+# from the corresponding versions.  Use a branch that is based such that it
+# includes all the changes that are described in the changelog.  Usually, merge
+# to master first and then immediately complete the release cycle.
+#
+# The major semver for related server and client programs should be equal.
+# Minor, patch, and pre-release may differ.
+
+# `bcpfs` is the repo version.
+bcpfs: 2.0.0
+
+# `bcpfs-perms` and `bcpfs-chown` are command versions.  Bump them for every
+# deb.  Consider prereleases to develop several features.
+bcpfs-perms: 2.0.0
+bcpfs-chown: 1.0.0
+
+# The major semver for the `bcpsucd` root server and the `bcpctl` command
+# should be equal.  Minor, patch, and pre-release may differ.
+bcpsucd: 0.4.1
+bcpctl: 0.4.2

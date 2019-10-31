@@ -1,0 +1,137 @@
+# See `Makefile` for details.
+# vim: sw=8
+
+IS_CONTAINER := $(shell test -d /go && echo isContainer)
+
+ifndef IS_CONTAINER
+    $(error "This Makefile must be used inside the godev container.")
+endif
+
+# The BUILD_TAG logic is duplicated from Makefile.  In a dev workspace, the
+# build tag is usually set by Makefile.  But a CI workspace might directly use
+# Makefile.docker.
+ifndef BUILD_TAG
+GIT_COMMIT_TAG := $(shell \
+    TZ=UTC git show -s \
+	 --date=format-local:%Y%m%dT%H%M%SZ --abbrev=6 --pretty=%cd-g%h \
+)
+GIT_DIRTY := $(shell \
+    if [ -n "$$(git status -s)" ]; then echo "-dirty"; fi \
+)
+BUILD_DATE := $(shell \
+    date -u +%s \
+)
+BUILD_TAG := $(GIT_COMMIT_TAG)-b$(BUILD_DATE)$(GIT_DIRTY)
+endif
+
+# Semvers are maintained in a file, so that they can be kept in sync with the
+# changelog.  The build tag is received from `Makefile`, where it is determined
+# from the host Git workspace.
+BCPFS_PERMS_VERSION := $(shell \
+    grep '^bcpfs-perms:' versions.yml | cut -d : -f 2 | tr -d ' ' \
+)
+BCPFS_CHOWN_VERSION := $(shell \
+    grep '^bcpfs-chown:' versions.yml | cut -d : -f 2 | tr -d ' ' \
+)
+BCPSUCD_VERSION := $(shell \
+    grep '^bcpsucd:' versions.yml | cut -d : -f 2 | tr -d ' ' \
+)
+BCPCTL_VERSION := $(shell \
+    grep '^bcpctl:' versions.yml | cut -d : -f 2 | tr -d ' ' \
+)
+
+GOFLAGS := -ldflags "\
+    -X github.com/nogproject/bcpfs/cmd/bcpfs-perms/v.Version=$(BCPFS_PERMS_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpfs-perms/v.Build=$(BUILD_TAG) \
+    -X github.com/nogproject/bcpfs/cmd/bcpsucd/v.Version=$(BCPSUCD_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpsucd/v.Build=$(BUILD_TAG) \
+    -X github.com/nogproject/bcpfs/cmd/bcpctl/v.Version=$(BCPCTL_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpctl/v.Build=$(BUILD_TAG) \
+    "
+
+# See <https://blog.docker.com/2016/09/docker-golang/> for netgo build.
+GOFLAGS_STATIC := -ldflags "\
+    -extldflags -static \
+    -X github.com/nogproject/bcpfs/cmd/bcpfs-perms/v.Version=$(BCPFS_PERMS_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpfs-perms/v.Build=$(BUILD_TAG) \
+    -X github.com/nogproject/bcpfs/cmd/bcpsucd/v.Version=$(BCPSUCD_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpsucd/v.Build=$(BUILD_TAG) \
+    -X github.com/nogproject/bcpfs/cmd/bcpctl/v.Version=$(BCPCTL_VERSION) \
+    -X github.com/nogproject/bcpfs/cmd/bcpctl/v.Build=$(BUILD_TAG) \
+    " \
+    -tags netgo -installsuffix netgo
+
+GOPKGS := ./pkg/... ./internal/... ./cmd/...
+
+BINARIES := bcpfs-perms bcpsucd bcpctl
+
+# Use `find` with excludes to list only our `.proto` files.
+PROTO_PB_GO := $(shell \
+    find . \
+	-path ./vendor -prune \
+	-o -name '*.proto' -print \
+    | sed -e 's/\.proto$$/\.pb.go/' \
+)
+
+.PHONY: install
+install: pbgo
+	@echo '    GO INSTALL'
+	go install $(GOFLAGS) -v $(GOPKGS)
+
+.PHONY: binaries
+binaries: pbgo
+	@echo '    GO INSTALL static (rebuild)'
+	go install $(GOFLAGS_STATIC) -v -a $(GOPKGS)
+	@echo '    CP $(addprefix product/bin/, $(BINARIES))'
+	@tar -C /go/bin --xform 's,^,product/bin/,' -cf- $(BINARIES) \
+	| tar -xvf-
+	@echo '    GEN product/bin/bcpfs-chown'
+	@cat bin/bcpfs-chown \
+	| sed -e "s/^semver=.*/semver='$(BCPFS_CHOWN_VERSION)+$(BUILD_TAG)'/" \
+	| install -m 0755 /dev/stdin product/bin/bcpfs-chown
+
+.PHONY: deb
+deb: binaries
+	@./tools/bin/make-deb
+
+.PHONY: clean
+clean:
+	@echo '    GO CLEAN'
+	go clean ${GOFLAGS} -i $(GOPKGS)
+	@echo '    RM *.pb.go'
+	@find . \
+	    -path ./vendor -prune \
+	    -o -name '*.pb.go' -exec rm -fv '{}' ';'
+	@echo '    RM vendor/'
+	@rm -rf vendor/
+
+.PHONY: vet
+vet:
+	@echo '    GO VET'
+	go vet $(GOPKGS)
+
+.PHONY: test
+test:
+	@echo '    GO TEST'
+	go test $(GOPKGS)
+
+.PHONY: errcheck
+errcheck:
+	@echo '    ERRCHECK'
+	errcheck $(GOPKGS)
+
+# Implicit rules for protoc.
+#
+# Example protoc call:
+#
+# ```
+# cd pkg/hello && protoc --go_out=plugins=grpc:. hello.proto
+# ```
+#
+# See <https://www.gnu.org/software/make/manual/make.html#Automatic-Variables>
+# for variables in implicit rules.
+pbgo: $(PROTO_PB_GO)
+
+%.pb.go : %.proto
+	@echo '    PROTOC $@'
+	cd $(@D) && protoc --go_out=plugins=grpc:. $(<F)

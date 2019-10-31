@@ -1,0 +1,7 @@
+Package: bcpfs-perms
+Version: {{ version }}
+Section: admin
+Priority: standard
+Architecture: amd64
+Maintainer: Steffen Prohaska <prohaska@zib.de>
+Description: BCP filesystem tool

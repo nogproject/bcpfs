@@ -1,0 +1,334 @@
+#!/bin/bash
+# vim: sw=4
+set -o errexit -o nounset -o pipefail -o noglob
+
+usage() {
+    cat <<\EOF
+Usage:
+  sudo bcpfs-propagate-toplevel-acls (--dry-run|--force) [--all | [-v] <select>]
+
+Options:
+  --all     Apply to all toplevel directories.
+  <select>  Restrict to toplevel directories whose full path matches this
+            extended regex.
+  -v        Invert match of regex pattern `<select>`.
+
+  --dry-run     Show what would have been applied.
+  --force       Actually apply changes.
+
+`bcpfs-propagate-toplevel-acls` uses `bcpfs-perms describe config` to determine
+the toplevel service and org unit directories.  Either `--all` direct child
+directories are considered, or the list of direct child directories is filter
+by the extended regex `<select>`.
+
+For each toplevel directory, it then reads the ACL and propagates a filtered
+default ACL to existing files and directories below.  It propagates only
+unnamed ACL entries and named group entries for which `bcpfs-perms` is
+responsible, which are the owning group and `foo-ops` groups.  Named user ACL
+entries are removed for all files and directories below.  NOE-9 sharing ACLs
+are not affected.
+
+The primary purpose was to fix permissions after the switch to the NOE-10 ACL
+design.  `bcpfs-propagate-toplevel-acls` needs to be also applied in other
+situations.
+
+After changing an organization unit subdir policy, for example from `people/`
+with policy `group` to `people/` policy `owner`,
+`bcpfs-propagate-toplevel-acls` must be applied to propagate the changes.
+
+Facility operators sometimes store data initially into subdirectories below
+`foo-facility` and later move the subdirectories to `bar-ag`.  The members of
+`bar-ag` will not be able to access the files immediately, because the move
+preserves the original ACLs, which restrict access to `foo-ops` and
+`foo-facility`.  `bcpfs-propagate-toplevel-acls` needs to be applied to add ACL
+entries for `bar-ag`.  Note that the resulting ACLs are not identical to ACLs
+for files that are stored in `bar-ag` right away.  ACLs after a move have
+entries:
+
+```
+group:foo-facility:rwx
+group:foo-ops:rwx
+group:bar-ag:rwx
+```
+
+While ACLs for files that were stored in `bar-ag` right away have only:
+
+```
+group:foo-ops:rwx
+group:bar-ag:rwx
+```
+
+We accept this difference, because it is not a security risk.  Files below
+`bar-ag` are still restricted by the ACL on `bar-ag`, which always only
+contains:
+
+```
+group:foo-ops:rwx
+group:bar-ag:rwx
+```
+
+Futhermore, `foo-facility` members were initially able to access the files.  So
+there is probably no need to pedantically remove access after the move.
+
+EOF
+    exit 1
+}
+
+main() {
+    argparse "$@"
+
+    if test ${opt_all}; then
+        ergxSelect='.'
+    else
+        ergxSelect="${arg_select}"
+    fi
+
+    if [ $EUID -ne 0 ]; then
+        die 'Must run as root.'
+    fi
+
+    rootdir="$(bcpfs-perms describe config | grep '^rootdir: ')"
+    rootdir="${rootdir#rootdir: }"
+
+    servicedir="$(bcpfs-perms describe config | grep '^servicedir: ')"
+    servicedir="${servicedir#servicedir: }"
+
+    orgunitdir="$(bcpfs-perms describe config | grep '^orgunitdir: ')"
+    orgunitdir="${orgunitdir#orgunitdir: }"
+
+    log="$(mktemp -t "bcpfs-propagate-toplevel-acls-$(date -u +%FT%H%M%SZ).XXXXX.log")"
+
+    xargsDryRun=
+    if test ${opt_dry_run}; then
+        xargsDryRun='-n 1 echo Would'
+    fi
+
+    (
+        find "${rootdir}/${servicedir}" -mindepth 2 -maxdepth 2 -type d
+        find "${rootdir}/${orgunitdir}" -mindepth 2 -maxdepth 2 -type d
+    ) \
+    | ( egrep ${opt_invert_select:+-v} "${ergxSelect}" || true ) \
+    | while read -r toplevel; do
+        if test ${opt_dry_run}; then
+            echo "# Would propagateToplevelAcl ${toplevel}"
+            echo
+        fi
+        propagateToplevelAcl "${toplevel}"
+    done \
+    | tee "${log}"
+
+    if [ -s "${log}" ]; then
+        echo
+        echo "log: ${log}"
+    else
+        rm "${log}"
+        echo "no changes."
+    fi
+}
+
+argparse() {
+    arg_select=
+    opt_all=
+    opt_dry_run=
+    opt_force=
+    opt_invert_select=
+    while [ $# -gt 0 ]; do
+        case $1 in
+        -h|--help)
+            usage
+            ;;
+        --all)
+            opt_all=t
+            shift
+            ;;
+        --dry-run)
+            opt_dry_run=t
+            shift
+            ;;
+        --force)
+            opt_force=t
+            shift
+            ;;
+        -v)
+            opt_invert_select=t
+            shift
+            ;;
+        --*)
+            die "Unknown option."
+            ;;
+        *)
+            if [ -z "${arg_select}" ]; then
+                arg_select="$1"
+                shift
+                continue
+            fi
+            die "Too many arguments."
+        esac
+    done
+
+    if ! test ${opt_all} && [ -z "${arg_select}" ]; then
+        die "Missing arguments."
+    fi
+
+    if test ${opt_all} && [ -n "${arg_select}" ]; then
+        die 'Require either `--all` or `<select>`.'
+    fi
+
+    if test ${opt_all} && test ${opt_invert_select}; then
+        die 'Option `-v` not allowed with `--all`.'
+    fi
+
+    isValidDryRunForce() {
+        ( test ${opt_dry_run} && ! test ${opt_force} ) \
+        || ( ! test ${opt_dry_run} && test ${opt_force} )
+    }
+    if ! isValidDryRunForce; then
+        die "Require either --dry-run or --force."
+    fi
+}
+
+propagateToplevelAcl() {
+    toplevel="$1"
+
+    filesLst="$(mktemp -t 'files.lst.XXXXXXXXX')"
+    oldLst="$(mktemp -t 'old.lst.XXXXXXXXX')"
+    newLst="$(mktemp -t 'new.lst.XXXXXXXXX')"
+    origDirAcl="$(mktemp -t 'orig-dir.acl.XXXXXXXXX')"
+    dirAcl="$(mktemp -t 'dir.acl.XXXXXXXXX')"
+    fileAcl="$(mktemp -t 'file.acl.XXXXXXXXX')"
+
+    getfacl --absolute-names --omit-header "${toplevel}" >"${origDirAcl}"
+
+    # Propagate filtered default ACL to below, which means `find -mindepth 1`.
+    # Modify only entries for which bcpfs-perms is responsible: the unnamed
+    # entries, the owning group, and X-ops groups.
+    #
+    # Named user entries are ignored for `dirAcl` and `fileAcl` and handled
+    # separately; see `namedUserAces` below.
+    owningGroup=$(stat -c %G "${toplevel}")
+    filteredDefaultAcl() {
+        cat "${origDirAcl}" \
+        | egrep \
+            -e '^default:user::' \
+            -e '^default:group::' \
+            -e "^default:group:${owningGroup}:" \
+            -e '^default:group:[^:]+-ops:' \
+            -e '^default:mask::' \
+            -e '^default:other::'
+    }
+
+    # The new directory ACL has two parts:
+    #
+    #  - the parent default ACL becomes the normal ACL;
+    #  - the parent default ACL is propagated.
+    #
+    (
+        filteredDefaultAcl | sed -e 's/^default://'
+        filteredDefaultAcl
+    ) >"${dirAcl}"
+
+    # Remove default entries and x-bit for the file ACL.
+    (
+        grep -v '^default:' "${dirAcl}" \
+        | sed --regexp-extended -e '/^(user|mask|other)/ s/x$/-/'
+    ) >"${fileAcl}"
+
+    # `listAcls()` is used for diff and for finding named user entries.
+    #
+    # It saves the file list during the first call and uses it for subsequent
+    # calls.  This ensures that ACLs are listed in the same order, so that the
+    # diff between `oldLst` and `newLst` is meaningful, and avoids sorting,
+    # which took noticable running time for large directory trees.
+    listAcls() {
+        if ! [ -s "${filesLst}" ]; then
+            find "${toplevel}" -mindepth 1 \
+                -type d -print0 -or -type f -print0 \
+                >"${filesLst}"
+        fi
+        xargs <"${filesLst}" -0 --no-run-if-empty getfacl -p --
+    }
+
+    if ! test ${opt_dry_run}; then
+        listAcls >"${oldLst}"
+    fi
+
+    # Owning group.  Run `chgrp` only if necessary, in order to avoid
+    # unnecessary ctime changes.  `chgrp` always updates the ctime even if the
+    # group is unmodified.
+    topGroup="$(stat -c %G "${toplevel}")"
+    find "${toplevel}" -mindepth 1 -not -group "${topGroup}" -print0 \
+    | xargs -0 --no-run-if-empty ${xargsDryRun} \
+    chgrp --no-dereference "${topGroup}" --
+
+    # SGID.  Run `chmod` only if necessary, in order to avoid unnecessary ctime
+    # changes.  `chmod` always updates the ctime even if the permissions are
+    # unmodified.
+    find "${toplevel}" -mindepth 1 -type d -not -perm -g+s -print0 \
+    | xargs -0 --no-run-if-empty ${xargsDryRun} chmod g+s --
+
+    # Drop named user ACL entries found below toplevel.
+    selectNamedUserAces() {
+        grep -e '^user:[^:]' -e '^default:user:[^:]' || true
+    }
+    dropAceMode() {
+        sed -e 's/\s*#effective.*//' -e 's/:[r-][w-][x-]$/:/'
+    }
+    joinComma() {
+        tr '\n' ',' | sed -e 's/,$//'
+    }
+    namedUserAces=$(
+        listAcls \
+        | selectNamedUserAces \
+        | dropAceMode \
+        | sort -u \
+        | joinComma
+    )
+    if [ -z "${namedUserAces}" ]; then
+        if test ${opt_dry_run}; then
+            echo "No named user ACL entries below ${toplevel}"
+        fi
+    elif test ${opt_dry_run}; then
+        echo Would setfacl -nx ${namedUserAces} -- below "${toplevel}"
+    else
+        find "${toplevel}" -mindepth 1 -type d -print0 -or -type f -print0 \
+        | xargs -0 --no-run-if-empty setfacl -nx "${namedUserAces}" --
+    fi
+
+    # Modify dir ACLs `dirAcl`.
+    if test ${opt_dry_run}; then
+        echo
+        echo Would setfacl --modify-file=- -- dirs below "${toplevel}"
+        cat "${dirAcl}"
+        echo EOF
+        echo
+    else
+        find "${toplevel}" -mindepth 1 -type d -print0 \
+        | xargs -0 --no-run-if-empty setfacl --modify-file="${dirAcl}" --
+    fi
+
+    # Modify file ACLs `fileAcl`.
+    if test ${opt_dry_run}; then
+        echo Would setfacl --modify-file=- -- files below "${toplevel}"
+        cat "${fileAcl}"
+        echo EOF
+        echo
+    else
+        find "${toplevel}" -mindepth 1 -type f -print0 \
+        | xargs -0 --no-run-if-empty setfacl --modify-file="${fileAcl}" --
+    fi
+
+    if ! test ${opt_dry_run}; then
+        listAcls >"${newLst}"
+        diff -U 15 "${oldLst}" "${newLst}" || true
+    fi
+
+    rm "${filesLst}" "${oldLst}" "${newLst}" "${origDirAcl}" \
+        "${dirAcl}" "${fileAcl}"
+}
+
+die() {
+    echo >&2 'Error:' "$@"
+    exit 1
+}
+
+main "$@"

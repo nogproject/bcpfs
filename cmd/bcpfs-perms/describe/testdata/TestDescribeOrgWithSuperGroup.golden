@@ -1,0 +1,56 @@
+orgunits:
+- name: lm-facility
+  subdirs: []
+  extradirs: []
+  isfacility: true
+  facility: lm
+  orgunitgroup:
+    name: org_lm-facility
+    gid: 2
+- name: ag-foo
+  subdirs:
+  - name: people
+    policy: owner
+  - name: service
+    policy: group
+  - name: shared
+    policy: manager
+  - name: projects
+    policy: group
+  extradirs:
+  - people
+  - service
+  - shared
+  - projects
+  isfacility: false
+  facility: ""
+  orgunitgroup:
+    name: org_ag-foo
+    gid: 6
+facilities:
+- name: lm
+services:
+- name: mic1
+  facility: lm
+  access: perService
+  supergroup:
+    name: ag_org
+    gid: 1
+  servicegroup:
+    name: srv_mic1
+    gid: 4
+  serviceopsgroup:
+    name: srv_lm-ops
+    gid: 3
+- name: mic2
+  facility: lm
+  access: perService
+  supergroup:
+    name: ag_org
+    gid: 1
+  servicegroup:
+    name: srv_mic2
+    gid: 5
+  serviceopsgroup:
+    name: srv_lm-ops
+    gid: 3

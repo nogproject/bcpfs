@@ -1,0 +1,113 @@
+#!/bin/bash
+# vim: sw=4
+set -o errexit -o nounset -o pipefail -o noglob
+
+# `products` will be filled in `debX()`.
+declare -a products
+
+main() {
+    if ! [ -d '/go' ]; then
+        die 'Must be run in a godev container.'
+    fi
+
+    mkdir -p 'product/deb'
+
+    deb bcpfs-perms bcpfsPermsIsUpToDate bcpfsPermsInstall
+    deb bcpfs-chown bcpfsChownIsUpToDate bcpfsChownInstall
+
+    echo '    SUMMARY deb'
+    echo
+    echo 'Debs:'
+    printf '%s\n' "${products[@]}"
+    echo
+    echo '    DONE'
+}
+
+deb() {
+    name="$1"
+    isUpToDate="$2"
+    installVroot="$3"
+
+    src="deb/${name}"
+    package="$(grep '^Package:' "${src}/control" | cut -d : -f 2 | tr -d ' ')"
+    arch="$(grep '^Architecture:' "${src}/control" | cut -d : -f 2 | tr -d ' ')"
+
+    # Tweaked semver to comply with Debian version ordering.  Specifically, the
+    # semver prerelease dash is replaced by a tilde.  For deb packaging, see:
+    # <https://www.debian.org/doc/debian-policy/ch-controlfields.html>.
+    version="$(grep "^${name}:" versions.yml | cut -d : -f 2 | tr -d ' ')"
+    case ${version} in
+    *-*)
+        version="$(tr '-' '~' <<<"${version}")+${BUILD_TAG:-unspecified-build-tag}"
+        ;;
+    esac
+
+    deb="product/deb/${package}_${version}_${arch}.deb"
+    products+=( "${deb}" )
+    echo "    DPKG-DEB ${deb}"
+    if ${isUpToDate} "${deb}"; then
+        echo 'Already up to date.'
+        return
+    fi
+
+    vroot=$(mktemp -d /tmp/make-deb-XXXXX)
+    trap "rm -rf '${vroot}'" EXIT
+
+    debian="${vroot}/DEBIAN"
+    install -m 0755 -d "${debian}"
+    sed <"${src}/control" \
+        -e "s/{{ *version *}}/${version}/" \
+    | install -m 0644 /dev/stdin "${debian}/control"
+
+    for script in postinst; do
+        if [ -e "${src}/${script}" ]; then
+            install -m 0755 "${src}/${script}" "${debian}/${script}"
+        fi
+    done
+
+    for other in templates; do
+        if [ -e "${src}/${other}" ]; then
+            install -m 0644 "${src}/${other}" "${debian}/${other}"
+        fi
+    done
+
+    ${installVroot}
+
+    dpkg-deb --build "${vroot}" "${deb}"
+
+    rm -r "${vroot}"
+    trap - EXIT
+}
+
+# Always build bcpfs-perms deb.
+bcpfsPermsIsUpToDate() {
+    false
+}
+
+bcpfsPermsInstall() {
+    bin="${vroot}/usr/bin"
+    install -m 0755 -d "${bin}"
+    install -m 0755 'product/bin/bcpfs-perms' "${bin}/bcpfs-perms"
+
+    doc="${vroot}/usr/share/doc/bcpfs"
+    install -m 0755 -d "${doc}"
+    install -m 0644 'cmd/bcpfs-perms/generic-example-bcpfs.hcl' "${doc}/generic-example-bcpfs.hcl"
+}
+
+# Always build bcpfs-chown deb.
+bcpfsChownIsUpToDate() {
+    false
+}
+
+bcpfsChownInstall() {
+    bin="${vroot}/usr/bin"
+    install -m 0755 -d "${bin}"
+    install -m 0755 'product/bin/bcpfs-chown' "${bin}/bcpfs-chown"
+}
+
+die() {
+    echo >&2 "fatal: $*"
+    exit 1
+}
+
+main "$@"

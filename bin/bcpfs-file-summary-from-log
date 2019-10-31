@@ -1,0 +1,121 @@
+#!/bin/bash
+# vim: sw=4
+set -o errexit -o nounset -o pipefail -o noglob
+
+bcpRootDir="$(egrep '^rootdir *= *"[^"]+" *$' /etc/bcpfs.hcl | cut -d '"' -f 2)/"
+
+usage() {
+    cat <<\EOF
+Usage:
+  bcpfs-file-summary-from-log <log-file> [<report-name-string>]
+
+`bcpfs-file-summary-from-log` prints a file summary into a report file.
+
+It requires file <log-file> that contains a list of files stored as a
+Null-terminated string.
+
+The name of the created report file starts with `fileSummary` and can be
+clarified with an additional name substring <report-name-string>.
+
+EOF
+    exit 1
+}
+
+main() {
+    argparse "$@"
+
+    if ! [ -e "${arg_logFile}" ]; then
+        die "Log file ${arg_logFile} does not exist."
+    fi
+
+    logFile="${arg_logFile}"
+
+    summaryName="fileSummary"
+    if [ -n "${arg_report}" ]; then
+        summaryName="${summaryName}-ag-${arg_report}"
+    fi
+    report="$(mktemp -t "${summaryName}-$(date -u +%FT%H%M%SZ).XXXXX.txt")"
+
+    createReport
+}
+
+argparse() {
+
+    arg_logFile=
+    arg_report=
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -h|--help)
+            usage
+            ;;
+        --*)
+            die "Unknown option '$1'."
+            ;;
+        *)
+            if [ -z "${arg_logFile}" ]; then
+                arg_logFile="$1"
+                shift
+                continue
+            elif [ -z "${arg_report}" ]; then
+                arg_report="$1"
+                shift
+                continue
+            else
+                die 'Too many arguments.'
+            fi
+        esac
+    done
+
+    if [ -z "${arg_logFile}" ]; then
+        die 'Require filename of log file.'
+    fi
+}
+
+createReport() {
+    size="$(du --total --human-readable --files0-from="${logFile}" | tail -n1 \
+        | tr '\t' ' ' | cut -d' ' -f1)B"
+    nFiles="$(grep -z -c . "${logFile}" || true)"
+
+    info "${summaryName}:"
+    printf '\nTotal usage: %s files, %s\n' \
+        "${nFiles}" "${size}" | tee "${report}"
+    if [ ${nFiles} -gt 0 ]; then
+        printf '\nSummary (#files in directories):\n' | tee -a "${report}"
+        cut -z -d/ -f 5-7 "${logFile}" | counts | tee -a "${report}"
+    fi
+
+    reportName="$(basename "${report}")"
+    cat <<EOF
+
+Saved file summary to '${report}'
+To copy the file summary :
+    ssh ${HOSTNAME} sudo cat ${report} > tmp/${reportName}
+To remove file summary  from server:
+    ssh ${HOSTNAME} sudo rm ${report}
+EOF
+}
+
+function counts() {
+    python -c '
+import sys
+from collections import Counter
+data = sys.stdin.read()
+list = data.strip("\x00").split("\x00")
+counts = Counter(list)
+for k, v in counts.items():
+    line = "\t{}\t{}".format(v, k)
+    print(line)
+'
+}
+
+die() {
+    echo >&2 '[bcpfs-file-summary-from-log] Error:' "$@"
+    exit 1
+}
+
+info() {
+    echo '[bcpfs-file-summary-from-log]' "$@"
+}
+
+main "$@"

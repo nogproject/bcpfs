@@ -1,0 +1,7 @@
+Package: bcpfs-chown
+Version: {{ version }}
+Section: admin
+Priority: standard
+Architecture: amd64
+Maintainer: Steffen Prohaska <prohaska@zib.de>
+Description: Tool to reassign files of former BCP accounts

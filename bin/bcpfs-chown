@@ -1,0 +1,258 @@
+#!/bin/bash
+# vim: sw=4
+set -o errexit -o nounset -o pipefail -o noglob
+
+semver='0.0.0-dev' # Placeholder will be replaced by `make-deb`.
+
+version() {
+    echo "bcpfs-chown-${semver}"
+    exit 0
+}
+
+cfgMinUid=2000
+
+usage() {
+    cat <<\EOF
+Usage:
+  bcpfs-chown <old-owner> <new-owner> (--dry-run|--force) [--log] [--report-name <filename-detail>] -- <path>
+
+Options:
+  --dry-run      List what would be changed.
+  --force        Apply ownership changes.
+  --log          Stores logfile in `--dry-run` mode.
+  --report-name  Specify filename detail for the report.
+
+`bcpfs-chown` set the ownership of data for the given path to `new-owner if the
+data is owned by `old-owner`.
+
+`old-owner` and `new-owner` can be specified by username or UID.  If the old
+owner has already been deleted, the old owner must be specified by the UID.
+
+`--force` applies `chown` to the paths that are below `path` and are owned by
+`old-owner`.  It additionally stores the changed paths into a logfile and
+prints the logfile path at the end.
+
+`--dry-run` only lists the paths that would be changed.   Add `--log` to store
+the found paths into a logfile in `--dry-run` mode.
+
+Use `--report-name` <filename-detail> to optionally specify a part of the
+report's filename.  It can be used to ensure the owner's username in the
+filename.  In case the owner has already been deleted, the filename contains
+the passed UID of <old-owner> by default.
+EOF
+    exit 1
+}
+
+main() {
+    findLog=
+    trap cleanup EXIT
+
+    argparse "$@"
+
+    if ( id "${arg_oldOwner}" >/dev/null ) ; then
+        oldOwner="$(id -un "${arg_oldOwner}")"
+        oldOwnerUID="$(id -u "${arg_oldOwner}")"
+    else
+        re='^[0-9]+$'
+        if [[ "${arg_oldOwner}" =~ ${re} ]] ; then
+            oldOwner="${arg_oldOwner}"
+            oldOwnerUID="${arg_oldOwner}"
+            info "Looking for data of unnamed user '${oldOwnerUID}' ...'"
+        else
+            die "User '${arg_oldOwner}' does not exist. Re-try with the UID."
+        fi
+    fi
+
+    newOwner="$(id -un "${arg_newOwner}")"
+    newOwnerUID="$(id -u "${arg_newOwner}")"
+
+    if [ "${oldOwnerUID}" -lt ${cfgMinUid} ]; then
+        die "UID ${arg_oldOwner} < ${cfgMinUid}; refusing to reassign data of system users."
+    fi
+    if [ "${newOwnerUID}" -lt ${cfgMinUid} ]; then
+        die "UID ${arg_newOwner} < ${cfgMinUid}; refusing to reassign data to system users."
+    fi
+
+    if ! bcpRootDir="$(
+        egrep '^rootdir *= *"[^"]+" *$' /etc/bcpfs.hcl | cut -d '"' -f 2
+    )"; then
+        die 'Failed to parse rootdir from /etc/bcpfs.hcl.'
+    fi
+    bcpRootDir="${bcpRootDir}/"
+
+    path="$(realpath "${arg_path}")"
+    if ! test -e "${path}" ; then
+        die "Path '${path}' does not exist."
+    fi
+    if [[ "${arg_path}" =~ .*/$ ]] ; then
+        path="${path}/"
+    fi
+    if [[ "${path}" != "${bcpRootDir}"* ]]; then
+        die "Path '${path}' must be a subdirectory of '${bcpRootDir}'."
+    fi
+
+    findLog="$(mktemp -t "bcpfs-chown-find-$(date -u +%FT%H%M%SZ).XXXXX.log")"
+    changeOwner
+}
+
+argparse() {
+    arg_oldOwner=
+    arg_newOwner=
+    opt_force=
+    opt_dry_run=
+    opt_log=
+    arg_reportName=
+    arg_path=
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+        -h|--help)
+            usage
+            ;;
+        --version)
+            version
+            ;;
+        --version)
+            version
+            ;;
+        --dry-run)
+            opt_dry_run=t
+            shift
+            ;;
+        --force)
+            opt_force=t
+            shift
+            ;;
+        --log)
+            opt_log=t
+            shift
+            ;;
+        --report-name)
+            arg_reportName="$2"
+            shift
+            shift
+            ;;
+        --)
+            shift
+            ;;
+        --*)
+            die "Unknown option '$1'."
+            ;;
+        *)
+            if [ -z "${arg_oldOwner}" ]; then
+                arg_oldOwner="$1"
+                shift
+                continue
+            elif [ -z "${arg_newOwner}" ]; then
+                arg_newOwner="$1"
+                shift
+                continue
+            elif [ -z "${arg_path}" ]; then
+                arg_path="$1"
+                shift
+                continue
+            else
+                die 'Too many arguments.'
+            fi
+        esac
+    done
+
+    if [ -z "${arg_path}" ] ; then
+        die 'Require -- <path>.'
+    fi
+    isValidDryRunForce() {
+        ( test ${opt_dry_run} && ! test ${opt_force} ) \
+        || ( ! test ${opt_dry_run} && test ${opt_force} )
+    }
+    if ! isValidDryRunForce; then
+        die 'Require either --dry-run or --force.'
+    fi
+}
+
+changeOwner() {
+    find "${path}" -user "${oldOwner}" -print0 > "${findLog}"
+
+    if nFound="$(grep -z -c . "${findLog}")" ; then
+        size="$(repquota -as | grep "${oldOwner}" | tr -s ' ' | \
+            cut -d" " -f 3)B"
+        if test ${opt_force} ; then
+            cat "${findLog}" \
+                | xargs -0 --no-run-if-empty chown -v "${newOwner}"
+            info "Changed ownership of ${nFound} files."
+            createReport "${nFound}" "${size}" "${arg_reportName}"
+        else
+            info "Would change ${nFound} files and dirs."
+            createReport "${nFound}" "${size}" "${arg_reportName}"
+        fi
+    else
+        info "No files found for user '${arg_oldOwner}'"
+    fi
+}
+
+createReport() {
+    files="$1"
+    size="$2"
+    nameDetail="$3"
+
+    mode=
+    if test ${opt_force} ; then
+        mode="applied"
+    else
+        mode="list"
+    fi
+
+    if [ -z "${nameDetail}" ] ; then
+        report="$(mktemp -t "bcpfs-chown-${oldOwner}-to-${newOwner}-${mode}-$(date -u +%FT%H%M%SZ).XXXXX.txt")"
+    else
+        report="$(mktemp -t "bcpfs-chown-${nameDetail}-${mode}-$(date -u +%FT%H%M%SZ).XXXXX.txt")"
+    fi
+
+    info "Report:"
+    printf 'Total usage: %s files, %s\n\nSummary (#files in directories):\n' \
+        "${files}" "${size}" | tee "${report}"
+    cut -z -d/ -f 5-7 ${findLog} | counts | tee -a "${report}"
+
+    if test ${opt_force} || test ${opt_log} ; then
+        reportName="$(basename ${report})"
+        cat <<EOF
+
+Saved report to '${report}'
+To copy the report:
+    ssh ${HOSTNAME} sudo cat ${report} > tmp/${reportName}
+To remove report from server:
+    ssh ${HOSTNAME} sudo rm ${report}
+EOF
+    else
+        rm "${report}"
+    fi
+}
+
+function counts() {
+    python -c '
+import sys
+from collections import Counter
+data = sys.stdin.read()
+list = data.strip("\x00").split("\x00")
+counts = Counter(list)
+for k, v in counts.items():
+    line = "\t{}\t{}".format(v, k)
+    print(line)
+'
+}
+
+die() {
+    echo >&2 '[bcpfs-chown] Error:' "$@"
+    exit 1
+}
+
+info() {
+    echo '[bcpfs-chown]' "$@"
+}
+
+cleanup() {
+    if [ -n "${findLog}" ]; then
+        rm "${findLog}"
+    fi
+}
+
+main "$@"

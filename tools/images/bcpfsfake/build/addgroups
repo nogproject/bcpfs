@@ -1,0 +1,64 @@
+#!/bin/bash
+# vim: sw=4
+set -o errexit -o nounset -o pipefail -o noglob
+
+# Create a few fake groups:
+#
+#   - research labs.
+#   - collaborative research projects.
+#   - facilities.
+#   - Nog.
+#   - microscopes.
+#   - analysis service.
+
+orgUnits='
+ag-alice
+ag-bob
+ag-charly
+ag-fake
+sfb-9999
+nog
+em-facility
+ms-facility
+fake-facility
+lm-facility
+'
+
+superGroup='
+ag_org
+'
+
+services='
+spim-100
+spim-222
+tem-505
+rem-707
+em-analysis
+ms-data
+fake-analysis
+fake-tem
+'
+
+facilities='
+em
+lm
+ms
+fake
+'
+
+addgroup ${superGroup}
+for ou in ${orgUnits}; do
+    addgroup "org_${ou}"
+    adduser --system --shell /bin/bash --ingroup "org_${ou}" "${ou}-member"
+    adduser --system --shell /bin/bash --ingroup "org_${ou}" "${ou}-member2"
+    usermod -aG ${superGroup} "${ou}-member"
+    usermod -aG ${superGroup} "${ou}-member2"
+done
+
+for d in ${services}; do
+    addgroup "srv_${d}"
+done
+
+for f in ${facilities}; do
+    addgroup "srv_${f}-ops"
+done

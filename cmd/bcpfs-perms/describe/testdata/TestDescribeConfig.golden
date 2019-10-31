@@ -1,0 +1,35 @@
+rootdir: /fsroot
+servicedir: srv
+orgunitdir: org
+supergroup: ""
+orgunitprefix: org
+serviceprefix: srv
+opssuffix: ops
+facilitysuffix: facility
+facilities:
+- name: lm
+  services:
+  - mic1
+  - mic2
+  access: perService
+orgunits:
+- name: ag-foo
+  subdirs:
+  - name: people
+    policy: owner
+  - name: service
+    policy: group
+  - name: shared
+    policy: manager
+  extradirs:
+  - projects
+filter:
+- services:
+  - mic1
+  - mic2
+  orgunits:
+  - ag_foo
+  action: accept
+symlinks:
+- path: srv/mic1/guides
+  target: org/lm-facility/service/guides

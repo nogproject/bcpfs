@@ -1,0 +1,7 @@
+.DS_Store
+/product/
+
+# See CONTRIBUTING.md "Vendor".
+/vendor/
+# See CONTRIBUTING.md "Protobuf".
+*.pb.go
